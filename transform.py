@@ -20,7 +20,7 @@ def xlsx_to_dataframe(xlsx_path):
     """Stream the source workbook to a DataFrame without loading it all into
     memory at once (the export can be 90MB+)."""
     wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
-    ws = wb['Sheet0']
+    ws = wb.worksheets[0] # use whichever tab is first, regardless of its name
     rows_iter = ws.iter_rows(values_only=True)
     header = None
     tmp_csv = xlsx_path + '.tmp.csv'
