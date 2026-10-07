@@ -103,6 +103,17 @@ EFFORT_MAP = {
 }
 
 
+def _numeric(series):
+    """Safely parse a numeric column that may contain real numbers OR text
+    using a comma as the decimal separator (e.g. a European-locale Google
+    Sheet storing '6,65' instead of '6.65'). Anything unparseable becomes
+    NaN rather than crashing the whole run."""
+    if not pd.api.types.is_numeric_dtype(series):
+        series = series.astype(str).str.strip().str.replace(',', '.', regex=False)
+        series = series.replace({'nan': None, 'None': None, '': None})
+    return pd.to_numeric(series, errors='coerce')
+
+
 def build_dataset(df):
     out = pd.DataFrame()
     d = pd.to_datetime(df['Local Response Date'])
@@ -113,7 +124,7 @@ def build_dataset(df):
     for src, dst in DIM_MAP.items():
         out[dst] = df[src].fillna('N/A').astype(str)
 
-    out['CSAT'] = df['Overall CSAT']
+    out['CSAT'] = _numeric(df['Overall CSAT'])
     # Standard NPS formula: classify each respondent as Promoter (+1, score 9-10),
     # Passive (0, score 7-8), or Detractor (-1, score 0-6). The mean of this
     # column * 100 equals "% Promoters - % Detractors" over all respondents
@@ -127,19 +138,21 @@ def build_dataset(df):
         if v <= 6:
             return -1
         return 0
-    out['NPS'] = df['Overall NPS'].apply(_nps_class).astype('Int64')
-    out['Chat Duration (min)'] = df['Chat Duration (Minutes)'].round(2)
-    out['Hold Duration (min)'] = df['Chat hold duration (minutes)'].round(2)
-    out['QM Score'] = df['Chat - Agent QM Score']
-    out['Interaction Effort Score'] = df['Chat Interaction Effort Score']
+    out['NPS'] = _numeric(df['Overall NPS']).apply(_nps_class).astype('Int64')
+    out['Chat Duration (min)'] = _numeric(df['Chat Duration (Minutes)']).round(2)
+    out['Hold Duration (min)'] = _numeric(df['Chat hold duration (minutes)']).round(2)
+    out['QM Score'] = _numeric(df['Chat - Agent QM Score'])
+    out['Interaction Effort Score'] = _numeric(df['Chat Interaction Effort Score'])
 
     for src, dst in QA_MAP.items():
-        out[dst] = (df[src] == 2).astype('Int64')
-        out.loc[df[src].isna(), dst] = pd.NA
+        src_num = _numeric(df[src])
+        out[dst] = (src_num == 2).astype('Int64')
+        out.loc[src_num.isna(), dst] = pd.NA
 
     for src, dst in EFFORT_MAP.items():
-        out[dst] = (df[src] == 2).astype('Int64')
-        out.loc[df[src].isna(), dst] = pd.NA
+        src_num = _numeric(df[src])
+        out[dst] = (src_num == 2).astype('Int64')
+        out.loc[src_num.isna(), dst] = pd.NA
 
     out['CSI More Details'] = df['CSI More Details']
     out['Url Chat Id'] = df['Url Chat Id']
@@ -158,7 +171,14 @@ def to_dashboard_json(out):
 
     for c in metric_cols:
         s = out[c]
-        data['metrics'][c] = [None if pd.isna(v) else round(float(v), 3) for v in s]
+        def _safe_round(v):
+            if pd.isna(v):
+                return None
+            try:
+                return round(float(v), 3)
+            except (TypeError, ValueError):
+                return None
+        data['metrics'][c] = [_safe_round(v) for v in s]
 
     csat_int = out['CSAT'].apply(lambda v: 'N/A' if pd.isna(v) else str(int(round(v))))
     codes, uniques = pd.factorize(csat_int)
