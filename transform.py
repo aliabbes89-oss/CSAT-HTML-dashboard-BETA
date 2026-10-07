@@ -18,22 +18,38 @@ import pandas as pd
 
 def xlsx_to_dataframe(xlsx_path):
     """Stream the source workbook to a DataFrame without loading it all into
-    memory at once (the export can be 90MB+)."""
+    memory at once (the export can be 90MB+). Auto-detects which row holds
+    the real header (row 1 for a plain Google Sheet, row 3 for the original
+    export-tool format with two title rows above it) by scanning the first
+    few rows for the 'Local Response Date' column name."""
     wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
-    ws = wb.worksheets[0] # use whichever tab is first, regardless of its name
+    ws = wb.worksheets[0]  # use whichever tab is first, regardless of its name
     rows_iter = ws.iter_rows(values_only=True)
-    header = None
+
+    all_rows = []
+    header_row_idx = None
+    for i, row in enumerate(rows_iter):
+        all_rows.append(row)
+        if row and 'Local Response Date' in row:
+            header_row_idx = i
+        if i >= 4 and header_row_idx is not None:
+            break  # found it, no need to keep buffering everything in memory
+
+    if header_row_idx is None:
+        raise RuntimeError(
+            "Could not find a 'Local Response Date' column in the first few rows "
+            "of the sheet. Check the export's column headers haven't changed."
+        )
+
     tmp_csv = xlsx_path + '.tmp.csv'
     with open(tmp_csv, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        for i, row in enumerate(rows_iter):
-            if i == 2:
-                header = row
-                writer.writerow(header)
-                continue
-            if i < 2:
-                continue
+        writer.writerow(all_rows[header_row_idx])
+        for row in all_rows[header_row_idx + 1:]:
             writer.writerow(row)
+        for row in rows_iter:  # continue streaming the rest of the file
+            writer.writerow(row)
+
     df = pd.read_csv(tmp_csv, low_memory=False)
     return df
 
@@ -98,7 +114,20 @@ def build_dataset(df):
         out[dst] = df[src].fillna('N/A').astype(str)
 
     out['CSAT'] = df['Overall CSAT']
-    out['NPS'] = df['Overall NPS']
+    # Standard NPS formula: classify each respondent as Promoter (+1, score 9-10),
+    # Passive (0, score 7-8), or Detractor (-1, score 0-6). The mean of this
+    # column * 100 equals "% Promoters - % Detractors" over all respondents
+    # (passives count in the denominator, contribute 0 to the numerator) --
+    # exactly the standard NPS calculation, computed per filtered slice in the UI.
+    def _nps_class(v):
+        if pd.isna(v):
+            return pd.NA
+        if v >= 9:
+            return 1
+        if v <= 6:
+            return -1
+        return 0
+    out['NPS'] = df['Overall NPS'].apply(_nps_class).astype('Int64')
     out['Chat Duration (min)'] = df['Chat Duration (Minutes)'].round(2)
     out['Hold Duration (min)'] = df['Chat hold duration (minutes)'].round(2)
     out['QM Score'] = df['Chat - Agent QM Score']
